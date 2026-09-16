@@ -308,7 +308,9 @@ try {
         Rec 'helper-real-apply-exit-0' ($hr.ran -and $hr.code -eq 0) "exit=$($hr.code) $($hr.note)"
         $rExe = Join-Path $fxrApp 'BailianFoundry.exe'
         $rLen = (Get-Item $rExe -ErrorAction SilentlyContinue).Length
-        Rec 'helper-real-payload-in-place' ((Test-Path $rExe) -and $rLen -gt 1MB) "size=$rLen"
+        $mz = $false
+        if (Test-Path $rExe) { try { $fs=[IO.File]::OpenRead($rExe); $b0=$fs.ReadByte(); $b1=$fs.ReadByte(); $fs.Close(); $mz=($b0 -eq 0x4D -and $b1 -eq 0x5A) } catch {} }
+        Rec 'helper-real-payload-in-place' ($mz -and $rLen -gt 10KB) "size=$rLen MZ=$mz (real Unity stub ~650KB)"
         $hl = Get-Content $hlog2 -Raw -ErrorAction SilentlyContinue
         Rec 'helper-real-launched' ($hl -match 'new version launched') 'helper.log launch line'
         Rec 'helper-real-backup-kept' (@(Get-ChildItem $fxrBak -Recurse -Filter 'OLD_INSTALL.txt' -ErrorAction SilentlyContinue).Count -ge 1) 'old install moved to backup'
