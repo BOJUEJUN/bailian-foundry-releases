@@ -24,11 +24,11 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$script:pass = 0; $script:fail = 0; $script:results = @()
-function Rec([string]$name, [bool]$ok, [string]$note = "") {
-  if ($ok) { $script:pass++ } else { $script:fail++ }
-  $script:results += [pscustomobject]@{ name=$name; ok=$ok; note=$note }
-  Write-Host ("[{0}] {1}{2}" -f ($(if($ok){'PASS'}else{'FAIL'})), $name, $(if($note){" — $note"}))
+$script:pass = 0; $script:fail = 0; $script:skip = 0; $script:results = @()
+function Rec([string]$name, [bool]$ok = $false, [string]$note = "", [switch]$Skip) {
+  if ($Skip) { $script:skip++; $st = 'SKIP' } elseif ($ok) { $script:pass++; $st = 'PASS' } else { $script:fail++; $st = 'FAIL' }
+  $script:results += [pscustomobject]@{ name=$name; ok=$ok; skipped=[bool]$Skip; note=$note }
+  Write-Host ("[{0}] {1}{2}" -f $st, $name, $(if($note){" — $note"}))
 }
 function Get-Local([string]$p) {
   if ($p -match '^https?://') {
@@ -59,15 +59,35 @@ try {
         -RedirectStandardOutput $instLog -RedirectStandardError $instErr
   Rec 'installer-exit-0' ($ip.ExitCode -eq 0) "exit=$($ip.ExitCode)"
 
-  Rec 'exe-installed' (Test-Path $appExe) $appExe
+  # Forensics: which payload dirs exist post-attempt pinpoints WHERE the NSI
+  # aborted — none = pre-extract (.onInit/probe), app.new = extract/swap stage.
+  $residue = @()
+  foreach ($d in @("$appDir.new", "$appDir.old", $appDir, $rootDir)) {
+    if (Test-Path $d) {
+      $n = @(Get-ChildItem $d -Recurse -Force -ErrorAction SilentlyContinue).Count
+      $residue += "$d ($n items)"
+    }
+  }
+  Rec 'install-residue-diagnostic' $true ("post-install state: " + $(if ($residue) { $residue -join ' | ' } else { "nothing written under $rootDir" }))
+
+  $installed = Test-Path $appExe
+  Rec 'exe-installed' $installed $appExe
   Rec 'unity-data-present' (Test-Path (Join-Path $appDir 'BailianFoundry_Data')) 'BailianFoundry_Data/'
   Rec 'unityplayer-dll' (Test-Path (Join-Path $appDir 'UnityPlayer.dll')) ''
   Rec 'helper-shipped' (Test-Path (Join-Path $appDir 'BailianUpdateHelper.exe')) 'required for apply step'
-  $fileInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe)
-  Rec 'exe-version-info' ($fileInfo.ProductName -ne '') "ProductName=$($fileInfo.ProductName) FileVer=$($fileInfo.FileVersion)"
+  $fileInfo = $null
+  if ($installed) { try { $fileInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe) } catch {} }
+  Rec 'exe-version-info' ($null -ne $fileInfo -and $fileInfo.ProductName -ne '') ($(if ($fileInfo) { "ProductName=$($fileInfo.ProductName) FileVer=$($fileInfo.FileVersion)" } else { 'exe absent — no version info' }))
   Rec 'uninstaller-present' (Test-Path $uninstExe) $uninstExe
   Rec 'no-admin-needed' ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') 'not SYSTEM'
 
+  if (-not $installed) {
+    foreach ($n in @('game-boots-window','process-alive','playerlog-phase-lines','playerlog-no-errors',
+                     'game-close-clean','uninstall-exit-0','app-removed','user-data-preserved',
+                     'unicode-path-install','unicode-path-boots','unicode-path-uninstall')) {
+      Rec $n -Skip -note 'install failed — check requires an installed game'
+    }
+  } else {
   # ---------- 2. native boot evidence ----------------------------------------
   if (Test-Path $playerLog) { Remove-Item $playerLog -Force }
   $proc = Start-Process -FilePath $appExe -PassThru
@@ -126,6 +146,7 @@ try {
       Rec 'unicode-path-uninstall' (-not (Test-Path $uExe)) "exit=$($uup.ExitCode)"
     }
   }
+  } # end if installed
 
   # ---------- 6. shipped update artifacts (manifest + zip graph) --------------
   if ($UpdateZip -ne '' -and $ManifestUrl -ne '') {
@@ -173,6 +194,23 @@ try {
   #   <fx>\app\BailianFoundry.exe + _Data\   (pretend installed game, not running)
   #   <fx>\staging\9.9.9\                    (pretend validated payload)
   #   <fx>\backup\, <fx>\updater\helper.log
+  if ($HelperExe -eq '' -and $UpdateZip -ne '') {
+    # The helper ships INSIDE the update zip / install payload — extract the
+    # real binary so apply/no-mutation still gets tested without a loose asset.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    try {
+      $uzp2 = Get-Local $UpdateZip
+      $z2 = [IO.Compression.ZipFile]::OpenRead($uzp2)
+      $he = $z2.Entries | Where-Object { $_.FullName -eq 'BailianUpdateHelper.exe' } | Select-Object -First 1
+      if ($he) {
+        $hxp = Join-Path $WorkRoot 'BailianUpdateHelper.exe'
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($he, $hxp, $true)
+        $HelperExe = $hxp
+        Write-Host "helper extracted from update zip -> $hxp"
+      } else { Write-Host 'no BailianUpdateHelper.exe entry in update zip — helper test skipped' }
+      $z2.Dispose()
+    } catch { Write-Host "helper extraction failed (skipped): $_" }
+  }
   if ($HelperExe -ne '') {
     $hx = Get-Local $HelperExe
     Rec 'helper-fetched' (Test-Path $hx) $hx
@@ -212,6 +250,6 @@ finally {
   $out = Join-Path $WorkRoot 'qa-results.json'
   [pscustomobject]@{ when=(Get-Date -Format o); workRoot=$WorkRoot;
     results=$script:results } | ConvertTo-Json -Depth 4 | Set-Content $out
-  Write-Host "`n==== $($script:pass)/$(($script:pass + $script:fail)) checks passed; results: $out"
+  Write-Host "`n==== $($script:pass) pass / $($script:fail) fail / $($script:skip) skip; results: $out"
   if ($script:fail -gt 0) { exit 1 }
 }
