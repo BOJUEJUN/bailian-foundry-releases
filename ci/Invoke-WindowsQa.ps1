@@ -113,6 +113,8 @@ try {
 
   if (-not $installed) {
     foreach ($n in @('game-boots-window','process-alive','playerlog-phase-lines','playerlog-no-errors',
+                     'combat-hwnd-found','combat-input-mode','combat-input-posted','combat-phase-entered',
+                     'combat-no-new-exceptions','combat-process-survived',
                      'game-close-clean','uninstall-exit-0','app-removed','user-data-preserved',
                      'unicode-path-install','unicode-path-boots','unicode-path-uninstall')) {
       Rec $n -Skip -note 'install failed — check requires an installed game'
@@ -136,6 +138,127 @@ try {
     Rec 'playerlog-phase-lines' ($log -match 'phase=') 'instrumented phases present'
     Rec 'playerlog-no-errors' ($log -notmatch 'Exception|MissingReference|shader.*(error|not found)') ''
   } else { Rec 'playerlog-phase-lines' $false 'Player.log missing'; Rec 'playerlog-no-errors' $false 'Player.log missing' }
+
+  # ---------- 2b. combat-entry smoke: real Enter -> phase=Combat -------------
+  # Regresses the 0.1.1 GamepadNavigator combat-entry NRE using a REAL key
+  # event on the game's own window — not state injection. Enter maps to
+  # GameAction.Confirm (BailianInput.cs) -> navigator ContextAdvance ->
+  # StartRun() -> phase=Combat logged.
+  #
+  # Mechanism ladder: PostMessageW(WM_KEYDOWN/UP, VK_RETURN) to
+  # $proc.MainWindowHandle — posts into the window thread's queue, works on a
+  # service/Session-0 runner. NOTE: PostMessage DELIVERY is not proof Unity
+  # consumed the key — only an observed phase=Combat transition proves the
+  # input path worked. keybd_event fallback (global input) is used ONLY when
+  # an interactive desktop exists AND our own game HWND is foreground at
+  # inject time; key-down is always paired with key-up in finally.
+  Add-Type -Namespace QaSmoke -Name U32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool PostMessageW(System.IntPtr h, uint m, System.UIntPtr w, System.IntPtr l);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool CloseDesktop(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, System.UIntPtr extra);
+'@
+
+  # keybd_event injects into the GLOBAL input stream -> it lands wherever
+  # focus is. Gate every send on GetForegroundWindow == our own game HWND
+  # (reacquire first); key-up is in finally so a held key can never leak
+  # into another window. Returns $false when our window isn't foreground.
+  function Send-ReturnKeybd([IntPtr]$targetHwnd) {
+    try { $null = [QaSmoke.U32]::SetForegroundWindow($targetHwnd); Start-Sleep -Milliseconds 250 } catch {}
+    if ([QaSmoke.U32]::GetForegroundWindow() -ne $targetHwnd) { return $false }
+    try {
+      [QaSmoke.U32]::keybd_event(0x0D, 0x1C, 0, [UIntPtr]::Zero)   # VK_RETURN down
+      Start-Sleep -Milliseconds 120
+    } finally {
+      try { [QaSmoke.U32]::keybd_event(0x0D, 0x1C, 2, [UIntPtr]::Zero) } catch {}  # KEYUP
+    }
+    return $true
+  }
+
+  $proc.Refresh()
+  $hwnd = $proc.MainWindowHandle
+  Rec 'combat-hwnd-found' ($hwnd -ne [IntPtr]::Zero) "hwnd=$hwnd pid=$($proc.Id)"
+
+  # foreground is informational only — PostMessage does not require it
+  $fgOk = $false
+  if ($hwnd -ne [IntPtr]::Zero) {
+    try { $null = [QaSmoke.U32]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 300 } catch {}
+    $fgOk = ([QaSmoke.U32]::GetForegroundWindow() -eq $hwnd)
+  }
+  $idesk = [QaSmoke.U32]::OpenInputDesktop(0, $false, 0x0001)   # DESKTOP_READOBJECTS
+  $interactive = ($idesk -ne [IntPtr]::Zero)
+  if ($interactive) { $null = [QaSmoke.U32]::CloseDesktop($idesk) }
+  Rec 'combat-input-mode' $true "interactiveDesktop=$interactive foreground=$fgOk (postmessage needs neither)"
+
+  # Snapshot the log position BEFORE the keypress in CHARACTER units of the
+  # same decoded string we will later substring — (Get-Item).Length is BYTES
+  # and misaligns on UTF-8 Chinese content. If the file is absent at snapshot
+  # time, offset 0 keeps the whole log (first phase/error lines never lost).
+  $logBeforeChars = 0
+  if (Test-Path $playerLog) {
+    $pre = Get-Content $playerLog -Raw -ErrorAction SilentlyContinue
+    if ($pre) { $logBeforeChars = $pre.Length }
+  }
+
+  $posted = $false; $mech = 'none'
+  if ($hwnd -ne [IntPtr]::Zero) {
+    # WM_KEYDOWN/WM_KEYUP VK_RETURN, scan 0x1C: down lParam 0x001C0001,
+    # up lParam 0xC01C0001 (bit30 previous-state + bit31 transition).
+    $d = [QaSmoke.U32]::PostMessageW($hwnd, 0x0100, [UIntPtr]0x0D, [IntPtr]0x001C0001)
+    Start-Sleep -Milliseconds 350            # key held ~20 frames — edge visible
+    $u = [QaSmoke.U32]::PostMessageW($hwnd, 0x0101, [UIntPtr]0x0D, [IntPtr][long]0xC01C0001)
+    $posted = ($d -and $u); if ($posted) { $mech = 'postmessage' }
+  }
+  if (-not $posted -and $interactive) {
+    if (Send-ReturnKeybd $hwnd) { $posted = $true; $mech = 'keybd_event' }
+  }
+  $mechNote = "mechanism=$mech" + $(if (-not $posted) { ' — no input path (session-0/no desktop); UNSUPPORTED on this runner' } else { ' (delivered != consumed; only phase=Combat proves it)' })
+  Rec 'combat-input-posted' $posted $mechNote
+
+  # bounded wait for the real transition evidence (max 30 s)
+  $combatSeen = $false; $cw = 0
+  while ($cw -lt 30 -and -not $combatSeen) {
+    Start-Sleep 2; $cw += 2
+    if (Test-Path $playerLog) {
+      $seg = (Get-Content $playerLog -Raw -ErrorAction SilentlyContinue)
+      if ($seg -and $seg.Substring([Math]::Min($logBeforeChars, $seg.Length)) -match 'phase=Combat') { $combatSeen = $true }
+    }
+    $proc.Refresh()
+    if ($proc.HasExited) { break }
+  }
+  # disambiguation: PostMessage delivered but no transition — on an
+  # interactive desktop retry once via keybd_event (real injection, still
+  # foreground-gated) before calling it a genuine fail. Bounded (<=20 s).
+  if (-not $combatSeen -and $interactive -and $mech -eq 'postmessage') {
+    if (Send-ReturnKeybd $hwnd) { $mech = 'postmessage+keybd_event-retry' }
+    $cw2 = 0
+    while ($cw2 -lt 20 -and -not $combatSeen) {
+      Start-Sleep 2; $cw2 += 2
+      if (Test-Path $playerLog) {
+        $seg = (Get-Content $playerLog -Raw -ErrorAction SilentlyContinue)
+        if ($seg -and $seg.Substring([Math]::Min($logBeforeChars, $seg.Length)) -match 'phase=Combat') { $combatSeen = $true }
+      }
+      $proc.Refresh(); if ($proc.HasExited) { break }
+    }
+    $cw += $cw2
+  }
+  $combatNote = "phase=Combat after ${cw}s via $mech"
+  if (-not $combatSeen -and $posted) { $combatNote += ' — delivered but no transition: cannot distinguish swallowed input from product defect on this runner' }
+  Rec 'combat-phase-entered' $combatSeen $combatNote
+
+  # observe 10 s of real combat; judge ONLY post-press log segment for
+  # exceptions (the 0.1.1 NRE fired on this exact transition)
+  Start-Sleep 10
+  $newSeg = ''
+  if (Test-Path $playerLog) {
+    $seg2 = (Get-Content $playerLog -Raw -ErrorAction SilentlyContinue)
+    if ($seg2) { $newSeg = $seg2.Substring([Math]::Min($logBeforeChars, $seg2.Length)) }
+  }
+  Rec 'combat-no-new-exceptions' ($combatSeen -and $newSeg -notmatch 'NullReferenceException|Unhandled|Exception:|FATAL') `
+      "$(($newSeg -split "`n").Count) new log lines scanned"
+  Rec 'combat-process-survived' ($combatSeen -and -not $proc.HasExited) "pid=$($proc.Id)"
 
   # ---------- 3. graceful close ----------------------------------------------
   if ($proc -and -not $proc.HasExited) {
