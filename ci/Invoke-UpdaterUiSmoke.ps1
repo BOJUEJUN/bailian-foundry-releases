@@ -51,6 +51,8 @@ Add-Type -Namespace QaUi -Name U32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetClientRect(System.IntPtr h, out RECT r);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ClientToScreen(System.IntPtr h, ref POINT p);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr after, int x, int y, int cx, int cy, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SystemParametersInfoW(uint action, uint param, ref RECT pv, uint fWinIni);
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 '@
@@ -134,6 +136,20 @@ try {
   $fgOk = $false
   if ($booted) {
     [void][QaUi.U32]::ShowWindow($hwnd, 9)                     # SW_RESTORE
+    # The shipped window can extend BEHIND the taskbar; the 检查更新 button
+    # sits at canvas bottom-left and was occluded (click landed on the
+    # taskbar). Fit the owned window inside the work area so the whole
+    # client rect is clickable, then re-acquire foreground.
+    try {
+      $wa = New-Object QaUi.U32+RECT
+      [void][QaUi.U32]::SystemParametersInfoW(0x0030, 0, [ref]$wa, 0)   # SPI_GETWORKAREA
+      $waW = $wa.Right - $wa.Left; $waH = $wa.Bottom - $wa.Top
+      if ($waW -gt 0 -and $waH -gt 0) {
+        [void][QaUi.U32]::SetWindowPos($hwnd, [IntPtr]::Zero,
+          $wa.Left + 20, $wa.Top + 10, [int]($waW * 0.9), [int]($waH * 0.88), 0x0040)  # SWP_SHOWWINDOW
+        Start-Sleep -Milliseconds 600
+      }
+    } catch {}
     [void][QaUi.U32]::SetForegroundWindow($hwnd)
     Start-Sleep -Milliseconds 400
     $fgOk = ([QaUi.U32]::GetForegroundWindow() -eq $hwnd)
@@ -145,14 +161,16 @@ try {
         else { '' }))
 
   # ---------- expected outcome from public manifest (corroboration only) ----------
-  $remote = $null
+  $remote = $null; $rawHead = ''
   try {
-    $mj = Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 `
+    $raw = Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 `
         'https://github.com/BOJUEJUN/bailian-foundry-releases/releases/latest/download/update.json' |
-        Select-Object -ExpandProperty Content | ConvertFrom-Json
+        Select-Object -ExpandProperty Content
+    $rawHead = ($raw -replace '\s+',' ').Substring(0, [Math]::Min(80, $raw.Length))
+    $mj = $raw | ConvertFrom-Json
     $remote = "$($mj.version)"
   } catch { $remote = "(manifest GET failed: $($_.Exception.Message))" }
-  Rec 'ui-manifest-corroboration' $true "public manifest version=$remote installed=0.1.2"
+  Rec 'ui-manifest-corroboration' $true "public manifest version='$remote' installed=0.1.2 raw='$rawHead'"
 
   # ---------- CHAR-offset snapshot, then click 检查更新 ----------
   $logOff = 0
