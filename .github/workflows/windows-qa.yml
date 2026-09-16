@@ -1,0 +1,125 @@
+# windows-qa.yml — bounded Windows acceptance for 百炼机关 (BailianFoundry).
+# Manual dispatch only. Downloads DRAFT or published release assets of THIS repo
+# through the authenticated REST API using the ephemeral GITHUB_TOKEN — draft
+# assets are NEVER anonymously reachable, so no public-URL assumptions.
+# No game source, no long-lived secrets in this repo or workflow.
+name: windows-qa
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to test (draft or published), e.g. v0.1.1'
+        required: true
+      helper_asset:
+        description: 'Update helper asset name; skipped if absent in the release'
+        required: false
+        default: 'BailianUpdateHelper.exe'
+
+# Draft releases/assets are only visible to a token with write-level repo
+# access. The ephemeral GITHUB_TOKEN below is scoped to this repo and this run
+# only — declared here, never stored. workflow_dispatch-only: no untrusted
+# code path can run with this token.
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-qa
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  qa:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout CI scripts only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: ci
+          sparse-checkout-cone-mode: true
+
+      - name: Download release assets (authenticated API — draft-safe)
+        shell: pwsh
+        env:
+          QA_TAG: ${{ inputs.tag }}
+          QA_HELPER: ${{ inputs.helper_asset }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          $tag  = $env:QA_TAG
+          $auth = @{ Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $rel  = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $auth
+          Write-Host ("release '{0}'  draft={1}  assets={2}" -f $rel.tag_name, $rel.draft, $rel.assets.Count)
+
+          function Get-AssetByName([string]$name) {
+            $a = $rel.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+            return $a
+          }
+          function Get-AssetByPattern([string]$pat) {
+            return ($rel.assets | Where-Object { $_.name -match $pat } | Select-Object -First 1)
+          }
+          function Save-Asset($a, [switch]$Optional) {
+            if (-not $a) {
+              if ($Optional) { Write-Host 'optional asset absent — skipped'; return '' }
+              throw "required asset missing in $tag"
+            }
+            $dst = Join-Path $env:RUNNER_TEMP $a.name
+            Invoke-WebRequest "https://api.github.com/repos/$repo/releases/assets/$($a.id)" `
+              -Headers ($auth + @{ Accept = 'application/octet-stream' }) `
+              -OutFile $dst -UseBasicParsing -TimeoutSec 600
+            $h = (Get-FileHash $dst -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host ("{0}  {1} bytes  sha256={2}" -f $a.name, (Get-Item $dst).Length, $h)
+            return $dst
+          }
+
+          $setup = Save-Asset (Get-AssetByPattern '^BailianFoundry-Setup-.+\.exe$')
+          if ((Get-Item $setup).Length -lt 1MB) { throw 'installer suspiciously small' }
+          $zip   = Save-Asset (Get-AssetByPattern '-windows-x64\.zip$')
+          $man   = Save-Asset (Get-AssetByName 'update.json')
+          $sums  = Save-Asset (Get-AssetByName 'SHA256SUMS.txt') -Optional
+          $help  = Save-Asset (Get-AssetByName $env:QA_HELPER) -Optional
+
+          # Cross-check downloaded binaries against published SHA256SUMS.txt
+          if ($sums) {
+            $map = @{}
+            Get-Content $sums | ForEach-Object {
+              if ($_ -match '^([0-9a-f]{64})\s+(.+)$') { $map[$Matches[2].Trim()] = $Matches[1] }
+            }
+            foreach ($f in @($setup, $zip)) {
+              $n = Split-Path $f -Leaf
+              if ($map.ContainsKey($n)) {
+                $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($h -ne $map[$n]) { throw "SHA256SUMS mismatch for $n" }
+              }
+            }
+            Write-Host 'SHA256SUMS.txt cross-check OK'
+          }
+
+          "QA_SETUP=$setup"   | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "QA_ZIP=$zip"       | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "QA_MANIFEST=$man"  | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "QA_HELPER_PATH=$help" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run Windows QA
+        shell: pwsh
+        run: |
+          & ./ci/Invoke-WindowsQa.ps1 `
+            -SetupExe   $env:QA_SETUP `
+            -UpdateZip  $env:QA_ZIP `
+            -ManifestUrl $env:QA_MANIFEST `
+            -HelperExe  $env:QA_HELPER_PATH `
+            -WorkRoot   (Join-Path $env:RUNNER_TEMP 'blqa')
+          if ($LASTEXITCODE -ne 0) { throw "QA failed ($LASTEXITCODE)" }
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-qa-evidence
+          path: |
+            ${{ runner.temp }}/blqa/logs/
+            ${{ runner.temp }}/blqa/qa-results.json
+          if-no-files-found: warn
