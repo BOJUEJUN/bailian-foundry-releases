@@ -1,0 +1,8 @@
+{
+  "armed": false,
+  "baselineVersion": "0.1.2",
+  "expectedVersion": "",
+  "expectedSha256": "",
+  "expectedSize": 0,
+  "note": "Arm ONLY after the coordinator approves a REAL published newer release with exact hashes (PUBLISH_APPROVED_READY-style gate) AND the live public update.json already advertises it. Invoke-WindowsQa.ps1 section 3c reads this file; while armed=false the upgrade acceptance flow is recorded as SKIP. To arm: set armed=true and fill expectedVersion/expectedSha256/expectedSize with the approved candidate's exact values, commit, then dispatch windows-qa with tag=<baseline>."
+}
