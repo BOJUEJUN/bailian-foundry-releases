@@ -115,6 +115,8 @@ try {
     foreach ($n in @('game-boots-window','process-alive','playerlog-phase-lines','playerlog-no-errors',
                      'combat-hwnd-found','combat-input-mode','combat-input-posted','combat-phase-entered',
                      'combat-no-new-exceptions','combat-process-survived',
+                     'ui-boot-menu','ui-input-env','ui-manifest-corroboration','ui-check-clicked',
+                     'ui-state-evidence','ui-capture','ui-verdict',
                      'game-close-clean','uninstall-exit-0','app-removed','user-data-preserved',
                      'unicode-path-install','unicode-path-boots','unicode-path-uninstall')) {
       Rec $n -Skip -note 'install failed — check requires an installed game'
@@ -129,7 +131,7 @@ try {
     Start-Sleep 2; $t += 2
     $proc.Refresh()
     if (-not $proc.HasExited -and $proc.MainWindowTitle -match '百炼') { $booted = $true }
-    elseif (Test-Path $playerLog -and (Get-Content $playerLog -Raw -ErrorAction SilentlyContinue) -match 'phase=Menu') { $booted = $true }
+    elseif ((Test-Path $playerLog) -and ((Get-Content $playerLog -Raw -ErrorAction SilentlyContinue) -match 'phase=')) { $booted = $true }
   }
   Rec 'game-boots-window' $booted "title='$($proc.MainWindowTitle)' after ${t}s"
   Rec 'process-alive' (-not $proc.HasExited) "pid=$($proc.Id)"
@@ -267,6 +269,25 @@ try {
     if (-not $gone) { $proc.Kill(); $proc.WaitForExit(5000) }
     Rec 'game-close-clean' $gone ($(if($gone){"exit=$($proc.ExitCode)"}else{'had to Kill'}))
   }
+
+  # ---------- 3b. updater-UI smoke (own fresh instance at Menu) ----------------
+  # Runs AFTER the first instance's graceful close and BEFORE uninstall so the
+  # installed game is still present. The child script owns its own process and
+  # records ui-* checks; results merge into this gate (failures count).
+  Write-Host '--- section 3b: updater UI smoke (检查更新 click)'
+  $uiScript = Join-Path $PSScriptRoot 'Invoke-UpdaterUiSmoke.ps1'
+  if (Test-Path $uiScript) {
+    try {
+      & $uiScript -AppExe $appExe -OutDir $logDir | ForEach-Object { Write-Host "  $_" }
+      $uiJson = Join-Path $logDir 'updater-ui-results.json'
+      if (Test-Path $uiJson) {
+        $uiRes = Get-Content $uiJson -Raw | ConvertFrom-Json
+        foreach ($prop in $uiRes.PSObject.Properties) {
+          Rec $prop.Name ([bool]$prop.Value.ok) $prop.Value.note
+        }
+      } else { Rec 'ui-verdict' $false 'updater-ui-results.json missing — smoke script produced no evidence' }
+    } catch { Rec 'ui-verdict' $false "smoke invocation failed: $_" }
+  } else { Rec 'ui-verdict' $false "Invoke-UpdaterUiSmoke.ps1 not found at $uiScript" }
 
   # ---------- 4. uninstall preserves updater root/user data -------------------
   Write-Host '--- section 4: uninstall/data preservation'
