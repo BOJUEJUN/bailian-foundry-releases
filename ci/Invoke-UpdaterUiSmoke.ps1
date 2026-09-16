@@ -166,7 +166,8 @@ try {
     $raw = Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 `
         'https://github.com/BOJUEJUN/bailian-foundry-releases/releases/latest/download/update.json' |
         Select-Object -ExpandProperty Content
-    $rawHead = ($raw -replace '\s+',' ').Substring(0, [Math]::Min(80, $raw.Length))
+    $flat = ($raw -replace '\s+',' ')
+    $rawHead = $flat.Substring(0, [Math]::Min(80, $flat.Length))
     $mj = $raw | ConvertFrom-Json
     $remote = "$($mj.version)"
   } catch { $remote = "(manifest GET failed: $($_.Exception.Message))" }
