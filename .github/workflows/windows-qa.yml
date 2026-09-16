@@ -51,7 +51,11 @@ jobs:
           $repo = $env:GITHUB_REPOSITORY
           $tag  = $env:QA_TAG
           $auth = @{ Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
-          $rel  = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $auth
+          # releases/tags/<tag> resolves only PUBLISHED releases (404 on drafts);
+          # list endpoint returns drafts to a token with repo write access.
+          $rels = Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=50" -Headers $auth
+          $rel  = $rels | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+          if (-not $rel) { throw "release not found: $tag" }
           Write-Host ("release '{0}'  draft={1}  assets={2}" -f $rel.tag_name, $rel.draft, $rel.assets.Count)
 
           function Get-AssetByName([string]$name) {
