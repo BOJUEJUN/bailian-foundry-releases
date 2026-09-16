@@ -163,13 +163,15 @@ try {
   # ---------- expected outcome from public manifest (corroboration only) ----------
   $remote = $null; $rawHead = ''
   try {
-    $raw = Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 `
-        'https://github.com/BOJUEJUN/bailian-foundry-releases/releases/latest/download/update.json' |
-        Select-Object -ExpandProperty Content
-    $flat = ($raw -replace '\s+',' ')
-    $rawHead = $flat.Substring(0, [Math]::Min(80, $flat.Length))
-    $mj = $raw | ConvertFrom-Json
-    $remote = "$($mj.version)"
+    # Invoke-WebRequest itself throws an internal "Substring" error on this
+    # runner's PS build for this URL (observed twice, before our own code).
+    # curl.exe ships with Windows and uses a different HTTP stack.
+    $raw = ((& curl.exe -sL --max-time 15 'https://github.com/BOJUEJUN/bailian-foundry-releases/releases/latest/download/update.json') -join "`n")
+    if ($raw) {
+      $mj = $raw | ConvertFrom-Json
+      $remote = "$($mj.version)"
+      $rawHead = if ($raw.Length -gt 80) { $raw.Substring(0,80) } else { $raw }
+    } else { $remote = '(empty response)' }
   } catch { $remote = "(manifest GET failed: $($_.Exception.Message))" }
   Rec 'ui-manifest-corroboration' $true "public manifest version='$remote' installed=0.1.2 raw='$rawHead'"
 
