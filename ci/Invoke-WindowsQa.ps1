@@ -247,6 +247,9 @@ try {
 }
 finally {
   if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch {} }
+  # collect NSIS runtime log if the installer wrote one (diag variant does)
+  Get-ChildItem "$env:TEMP\BailianFoundry-Setup*.log" -ErrorAction SilentlyContinue |
+    ForEach-Object { Copy-Item $_.FullName $logDir -Force -ErrorAction SilentlyContinue }
   $out = Join-Path $WorkRoot 'qa-results.json'
   [pscustomobject]@{ when=(Get-Date -Format o); workRoot=$WorkRoot;
     results=$script:results } | ConvertTo-Json -Depth 4 | Set-Content $out
