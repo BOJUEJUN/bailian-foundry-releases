@@ -289,6 +289,36 @@ try {
     } catch { Rec 'ui-verdict' $false "smoke invocation failed: $_" }
   } else { Rec 'ui-verdict' $false "Invoke-UpdaterUiSmoke.ps1 not found at $uiScript" }
 
+  # ---------- 3c. in-game upgrade acceptance (ARMED only) ---------------------
+  # Armed exclusively by ci/upgrade-acceptance.json {armed:true + exact
+  # approved expectedVersion/expectedSha256/expectedSize}. While disarmed the
+  # flow is a recorded SKIP — never a fake pass, never runs against a mock.
+  # When armed it drives: baseline UI check -> Available(exact versions) ->
+  # download -> ReadyToApply -> Apply -> helper(wait-pid) swap -> NEW owned
+  # process+HWND -> runtime version proof via a second in-game check.
+  Write-Host '--- section 3c: upgrade acceptance (armed by ci/upgrade-acceptance.json)'
+  $armFile = Join-Path $PSScriptRoot 'upgrade-acceptance.json'
+  $upgScript = Join-Path $PSScriptRoot 'Invoke-UpdaterUpgradeSmoke.ps1'
+  $arm = $null
+  if (Test-Path $armFile) { try { $arm = Get-Content $armFile -Raw | ConvertFrom-Json } catch { $arm = $null } }
+  if ($arm -and $arm.armed -eq $true -and $arm.expectedVersion -and $arm.expectedSha256 -and $arm.expectedSize -and (Test-Path $upgScript)) {
+    try {
+      & $upgScript -AppExe $appExe -OutDir $logDir `
+          -ExpectVersion "$($arm.expectedVersion)" -ExpectSha256 "$($arm.expectedSha256)" `
+          -ExpectSize ([long]$arm.expectedSize) -BaselineVersion "$($arm.baselineVersion)" |
+          ForEach-Object { Write-Host "  $_" }
+      $upgJson = Join-Path $logDir 'updater-upgrade-results.json'
+      if (Test-Path $upgJson) {
+        $upgRes = Get-Content $upgJson -Raw | ConvertFrom-Json
+        foreach ($prop in $upgRes.PSObject.Properties) {
+          Rec $prop.Name ([bool]$prop.Value.ok) $prop.Value.note
+        }
+      } else { Rec 'upg-verdict' $false 'updater-upgrade-results.json missing — harness produced no evidence' }
+    } catch { Rec 'upg-verdict' $false "upgrade harness invocation failed: $_" }
+  } else {
+    Rec 'upg-armed' $false 'upgrade acceptance NOT armed — needs real approved newer public release + ci/upgrade-acceptance.json triple' -Skip
+  }
+
   # ---------- 4. uninstall preserves updater root/user data -------------------
   Write-Host '--- section 4: uninstall/data preservation'
   $marker = Join-Path $rootDir 'qa-preserve-marker.txt'
