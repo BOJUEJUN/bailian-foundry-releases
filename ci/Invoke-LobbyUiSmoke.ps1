@@ -216,20 +216,132 @@ try {
         else { "no Relay alloc within ${RoomTimeoutSec}s — create did not provision a session (capability/backend issue or button disabled)" })
   Rec 'lobby-capture' ($null -ne $shot2) $(if ($shot2) { 'room panel captured (root reviews room code visually)' } else { 'window capture unavailable' })
 
-  # ---------- leave the owned room ----------
-  # RoomPanel is 780x620 centered (canvas 570..1350 x 230..850); LeaveBtn is
-  # panel-local anchor(1,0) pivot(1,0) pos(-60,60) size(220,96) => canvas
-  # center (1180,338).
+  # ---------- full room workflow: 准备 -> 开始战斗 -> Combat -> 返回主菜单 ----------
+  # RoomPanel 780x620 centered (canvas x 570..1350, y 230..850). 0.1.4 footer
+  # uses fractional anchors (disjoint thirds):
+  #   ReadyBtn anchor(0,0)-(1/3,0) off(40,60)-(-10,156) => panel (145,108) => canvas (715,338)
+  #   StartBtn anchor(1/3,0)-(2/3,0) off(10,60)-(-10,156) => panel (390,108) => canvas (960,338)
+  #   LeaveBtn anchor(2/3,0)-(1,0)   off(10,60)-(-40,156) => panel (635,108) => canvas (1205,338)
+  $readyPub = $false; $combat = $false; $menuBack = $false
   if ($created) {
-    $null = ClickCanvas 1180 338 'room-leave'          # LeaveBtn 离开
-    Start-Sleep 2
-    $proc.Refresh()
-    Rec 'lobby-leave-clean' (-not $proc.HasExited) '离开 clicked; room released (process still healthy)'
+    # --- 准备: consumption = a NEW 'proof props published' line.
+    # SetReadyAsync -> SaveCurrentPlayerDataAsync rides the same wrapped save
+    # that logs the publish — delivery alone is not consumption. Re-snapshot
+    # $logOff first so LogTail only sees post-click lines.
+    $pre = Get-Content $playerLog -Raw -ErrorAction SilentlyContinue
+    if ($pre) { $logOff = $pre.Length }
+    $null = ClickCanvas 715 338 'room-ready'
+    $rw = 0
+    while ($rw -lt 15 -and -not $readyPub) {
+      Start-Sleep 2; $rw += 2
+      if ((LogTail) -match 'proof props published') { $readyPub = $true }
+      $proc.Refresh(); if ($proc.HasExited) { break }
+    }
+    Start-Sleep 1
+    $shot3 = Capture 'lobby-3-ready.png'          # slot ready state + start hint
+    Rec 'lobby-ready-published' $readyPub `
+        $(if ($readyPub) { "准备 click -> player props save published (${rw}s); ready state in lobby-3-ready.png" }
+          else { 'no props publish within 15s after 准备 — backend consumption unproven (see lobby-3-ready.png)' })
+
+    # --- 开始战斗: solo start is legitimate — ComputeStartEligible passes at
+    # occ>=1 once AllReady ("可单人开始"). Consumption = real phase=Combat.
+    if ($readyPub) {
+      $pre = Get-Content $playerLog -Raw -ErrorAction SilentlyContinue
+      if ($pre) { $logOff = $pre.Length }
+      $null = ClickCanvas 960 338 'room-start'
+      $sw2 = 0
+      while ($sw2 -lt 25 -and -not $combat) {
+        Start-Sleep 2; $sw2 += 2
+        if ((LogTail) -match 'phase=Combat') { $combat = $true }
+        $proc.Refresh(); if ($proc.HasExited) { break }
+      }
+      Start-Sleep 3
+      $shot4 = Capture 'lobby-4-combat.png'       # real co-op combat frame
+      Rec 'lobby-match-started' $combat `
+          $(if ($combat) { "开始战斗 -> phase=Combat after ${sw2}s; owned process healthy" }
+            else { 'no phase=Combat within 25s — start not consumed (all-ready gate or backend)' })
+
+      # --- return via actual controls: Esc opens the co-op local-pause
+      # overlay (战斗菜单), then 返回主菜单 — inside the 480x560 centered
+      # pause panel (canvas y 250..830): anchor(0.5,1) pos(0,-416) =>
+      # panel-local y 144 => canvas (960,394). ReturnToMenu calls
+      # link.RequestLeave() so the room is released here.
+      if ($combat) {
+        [QaLobby.U32]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 80
+        [QaLobby.U32]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)
+        Start-Sleep 2
+        $shotEsc = Capture 'lobby-4b-pause.png'   # local pause overlay
+        $null = ClickCanvas 960 394 'pause-menu-exit'
+        $mw = 0
+        while ($mw -lt 15 -and -not $menuBack) {
+          Start-Sleep 2; $mw += 2
+          if ((LogTail) -match 'phase=Menu') { $menuBack = $true }
+          $proc.Refresh(); if ($proc.HasExited) { break }
+        }
+        Start-Sleep 1
+        $shot5 = Capture 'lobby-5-back.png'
+        Rec 'lobby-returned-to-menu' $menuBack `
+            $(if ($menuBack) { "Esc -> 返回主菜单 -> phase=Menu after ${mw}s (ReturnToMenu issued RequestLeave)" }
+              else { 'no phase=Menu within 15s — pause/menu return not consumed' })
+      }
+    }
   }
 
-  Rec 'lobby-verdict' ($created -and $opened) `
-      $(if ($created) { 'normal menu -> 联机 -> 创建房间 produced a real Relay session; room code shown in UI' }
-        else { 'lobby flow incomplete — see checks above (panel open alone is NOT room creation)' })
+  # ---------- separate explicit leave flow: clean RoomReleased ----------
+  # Re-open 联机 (entry = prior room released; room panel = still in room —
+  # screenshot shows which), create room #2, click 离开房间 directly.
+  $room2 = $false
+  if ($created) {
+    Start-Sleep 2
+    $null = ClickCanvas 960 234 'coop-reopen'
+    Start-Sleep 7                                   # reopen + capability settle
+    $shot6 = Capture 'lobby-6-entry.png'
+    # retype nick (DraftNick may persist; appending 'qa2' stays <=16 either way)
+    $null = ClickCanvas 960 582 'nick-field-2'
+    Start-Sleep -Milliseconds 400
+    foreach ($vk in 0x51,0x41,0x32) {               # "qa2"
+      if ([QaLobby.U32]::GetForegroundWindow() -ne $hwnd) { break }
+      [QaLobby.U32]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
+      [QaLobby.U32]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
+    }
+    $pre = Get-Content $playerLog -Raw -ErrorAction SilentlyContinue
+    if ($pre) { $logOff = $pre.Length }
+    $null = ClickCanvas 960 490 'room-create-2'
+    $aw = 0; $alloc2 = ''
+    while ($aw -lt 30 -and -not $room2) {
+      Start-Sleep 2; $aw += 2
+      $t = LogTail
+      if ($t -match 'local alloc token from transport') {
+        $room2 = $true
+        $alloc2 = ($t -split "`n" | Where-Object { $_ -match 'local alloc token' } | Select-Object -First 1)
+      }
+      $proc.Refresh(); if ($proc.HasExited) { break }
+    }
+    Start-Sleep 1
+    $shot7 = Capture 'lobby-7-room2.png'
+    Rec 'lobby-room2-created' $room2 `
+        $(if ($room2) { "room #2 alloc after ${aw}s: $alloc2" }
+          else { 'no second Relay alloc — reopen did not yield a fresh create (still in room? see lobby-6-entry.png)' })
+
+    # --- direct 离开房间: the explicit room-release path ----------
+    if ($room2) {
+      $null = ClickCanvas 1205 338 'room-leave'
+      Start-Sleep 3
+      $shot8 = Capture 'lobby-8-leave-entry.png'    # room panel -> entry
+      $proc.Refresh()
+      Rec 'lobby-leave-clean' (-not $proc.HasExited) '离开房间 clicked; room released (process healthy; entry in lobby-8-leave-entry.png)'
+    }
+  }
+
+  Rec 'lobby-verdict' ($created -and $readyPub -and $combat -and $menuBack) `
+      $(if ($created -and $readyPub -and $combat -and $menuBack) {
+          'full normal room workflow real: create -> Relay -> ready -> start -> Combat -> menu'
+        } else {
+          "room workflow incomplete: created=$created ready=$readyPub combat=$combat menu=$menuBack room2=$room2"
+        })
 }
 finally {
   if ($proc -and -not $proc.HasExited) {
