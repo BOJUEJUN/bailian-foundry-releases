@@ -52,14 +52,12 @@ function Rec($name, $ok, $note='') {
 }
 
 Add-Type -AssemblyName System.Drawing
-# Guard: Invoke-UpdaterUiSmoke.ps1 already compiles QaUi.U32 into the same
-# runner session — re-adding throws "Cannot add type". Reuse if present.
-if (-not ('QaUi.U32' -as [type])) {
-  Add-Type -Namespace QaUi -Name U32 -MemberDefinition @'
+# Unique namespace: Invoke-UpdaterUiSmoke.ps1 already compiles QaUi.U32 into
+# this shared runner session; re-using that name throws "Cannot add type".
+Add-Type -Namespace QaCoop -Name U32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
 public struct RECT { public int Left, Top, Right, Bottom; }
 '@
-}
 
 $markLog  = Join-Path $OutDir "coop-qa-$Role.log"   # driver writes marks here (+ .pause.png)
 $playerLog = Join-Path $env:USERPROFILE 'AppData\LocalLow\Bailian\百炼机关\Player.log'
@@ -80,8 +78,8 @@ function Shot($name) {
     $proc.Refresh()
     $hw = $proc.MainWindowHandle
     if ($hw -eq [IntPtr]::Zero) { return $null }
-    $wr = New-Object QaUi.U32+RECT
-    if (-not [QaUi.U32]::GetWindowRect($hw, [ref]$wr)) { return $null }
+    $wr = New-Object QaCoop.U32+RECT
+    if (-not [QaCoop.U32]::GetWindowRect($hw, [ref]$wr)) { return $null }
     $w = $wr.Right - $wr.Left; $h = $wr.Bottom - $wr.Top
     if ($w -le 0 -or $h -le 0) { return $null }
     $bmp = New-Object System.Drawing.Bitmap $w, $h
