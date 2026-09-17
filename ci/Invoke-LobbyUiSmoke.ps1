@@ -159,15 +159,22 @@ try {
   Rec 'lobby-coop-opened' $opened $(if ($opened) { 'physical click at 联机 (canvas 960,234); entry panel captured' } else { 'not attempted — input env unsupported or mapping failed' })
 
   # ---------- click 创建房间 -> wait for real Relay alloc ----------
+  # EntryPanel is a 620x560 CENTERED modal (canvas 650..1270 x 260..820);
+  # CreateBtn is panel-local (72,190)-(548,286) => canvas center (960,498).
   $created = $false; $allocLine = ''
   if ($opened) {
-    $null = ClickCanvas 310 238 'room-create'          # CreateBtn 创建房间
     $cw = 0
-    while ($cw -lt $RoomTimeoutSec -and -not $created) {
-      Start-Sleep 2; $cw += 2
-      $t = LogTail
-      if ($t -match '\[NgoChannel\] local alloc token from transport') { $created = $true; $allocLine = ($t -split "`n" | Where-Object { $_ -match 'local alloc token' } | Select-Object -First 1) }
-      $proc.Refresh(); if ($proc.HasExited) { break }
+    foreach ($tryNo in 1,2) {
+      $null = ClickCanvas 960 498 "room-create#$tryNo"  # CreateBtn 创建房间
+      while ($cw -lt 30 -and -not $created) {
+        Start-Sleep 2; $cw += 2
+        $t = LogTail
+        if ($t -match '\[NgoChannel\] local alloc token from transport') { $created = $true; $allocLine = ($t -split "`n" | Where-Object { $_ -match 'local alloc token' } | Select-Object -First 1) }
+        $proc.Refresh(); if ($proc.HasExited) { break }
+      }
+      if ($created -or $proc.HasExited) { break }
+      # first click may have landed while the button was still disabled
+      # (capability check settling) — one retry is bounded and honest.
     }
     Start-Sleep 1
     $shot2 = Capture 'lobby-2-room.png'                # room panel: code text top-right
@@ -179,8 +186,11 @@ try {
   Rec 'lobby-capture' ($null -ne $shot2) $(if ($shot2) { 'room panel captured (root reviews room code visually)' } else { 'window capture unavailable' })
 
   # ---------- leave the owned room ----------
+  # RoomPanel is 780x620 centered (canvas 570..1350 x 230..850); LeaveBtn is
+  # panel-local anchor(1,0) pivot(1,0) pos(-60,60) size(220,96) => canvas
+  # center (1180,338).
   if ($created) {
-    $null = ClickCanvas 1750 108 'room-leave'          # LeaveBtn 离开
+    $null = ClickCanvas 1180 338 'room-leave'          # LeaveBtn 离开
     Start-Sleep 2
     $proc.Refresh()
     Rec 'lobby-leave-clean' (-not $proc.HasExited) '离开 clicked; room released (process still healthy)'
