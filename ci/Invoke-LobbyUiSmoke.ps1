@@ -166,13 +166,13 @@ try {
   }
   Rec 'lobby-coop-opened' $opened $(if ($opened) { 'physical click at 联机 (canvas 960,234); entry panel captured' } else { 'not attempted — input env unsupported or mapping failed' })
 
-  # ---------- nickname is REQUIRED (main verified: Create toasts "1-16
-  # chars" when empty). Focus the nick field (panel-local anchor(0,1)
-  # pos(72,-230) size(476,88) => canvas (960,546)) and type real letters.
-  # Foreground-gated keybd_event produces real WM_CHAR via TranslateMessage.
+  # ---------- nickname entry (ed6a48b layout: top-anchored buttons below
+  # the field; Nick() defaults to 玩家 when empty, but typing proves real
+  # input). NickField: anchor(0,1) pos(72,-228) size(476,80) on the centered
+  # 620x620 EntryPanel => canvas (960,582).
   $nickTyped = $false
   if ($opened) {
-    $null = ClickCanvas 960 546 'nick-field'
+    $null = ClickCanvas 960 582 'nick-field'
     Start-Sleep -Milliseconds 400
     foreach ($vk in 0x51,0x41,0x57,0x49,0x4E,0x43,0x49) {   # "qawinci"
       if ([QaLobby.U32]::GetForegroundWindow() -ne $hwnd) { break }
@@ -188,13 +188,15 @@ try {
   Rec 'lobby-nick-typed' $nickTyped $(if ($nickTyped) { 'typed qawinci into nick field (see lobby-1b-nick.png)' } else { 'not attempted — lobby never opened' })
 
   # ---------- click 创建房间 -> wait for real Relay alloc ----------
-  # EntryPanel is a 620x560 CENTERED modal (canvas 650..1270 x 260..820);
-  # CreateBtn is panel-local (72,190)-(548,286) => canvas center (960,498).
+  # ed6a48b: EntryPanel is a 620x620 CENTERED modal (canvas 650..1270 x
+  # 230..850); CreateBtn anchor(0,1) pos(72,-320) size(476,80) =>
+  # panel-local y[220,300] => canvas center (960,490). JoinBtn sits at
+  # canvas (960,398) — 92 units below create, no overlap.
   $created = $false; $allocLine = ''
   if ($opened) {
     $cw = 0
     foreach ($tryNo in 1,2) {
-      $null = ClickCanvas 960 498 "room-create#$tryNo"  # CreateBtn 创建房间
+      $null = ClickCanvas 960 490 "room-create#$tryNo"  # CreateBtn 创建房间
       while ($cw -lt 30 -and -not $created) {
         Start-Sleep 2; $cw += 2
         $t = LogTail
