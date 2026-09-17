@@ -52,10 +52,14 @@ function Rec($name, $ok, $note='') {
 }
 
 Add-Type -AssemblyName System.Drawing
-Add-Type -Namespace QaUi -Name U32 -MemberDefinition @'
+# Guard: Invoke-UpdaterUiSmoke.ps1 already compiles QaUi.U32 into the same
+# runner session — re-adding throws "Cannot add type". Reuse if present.
+if (-not ('QaUi.U32' -as [type])) {
+  Add-Type -Namespace QaUi -Name U32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
 public struct RECT { public int Left, Top, Right, Bottom; }
 '@
+}
 
 $markLog  = Join-Path $OutDir "coop-qa-$Role.log"   # driver writes marks here (+ .pause.png)
 $playerLog = Join-Path $env:USERPROFILE 'AppData\LocalLow\Bailian\百炼机关\Player.log'
@@ -145,6 +149,37 @@ try {
   $proc = Start-Process -FilePath $exe.FullName -ArgumentList $qaArgs -PassThru `
           -WorkingDirectory $WorkRoot   # own cwd — never inside appDir (locks)
   Rec 'coop-process-owned' $true "pid=$($proc.Id) start=$($proc.StartTime.ToString('o')) exe=$($exe.FullName) args=[$($qaArgs -join ' ')]"
+
+  # ---------- host role: publish the live room code for the remote joiner ----
+  # The driver's 90s member-wait starts at room creation — CI joiners can't
+  # meet that (queue+baseline+download), so CI hosts and the remote peer joins.
+  # The room file is runner-local; publish the code to ci/coop-room-live.txt
+  # via the ambient GH_TOKEN (contents:write already granted to the job) so a
+  # bounded local poller on the Mac side can read it. Ephemeral, not a secret.
+  if ($Role -eq 'host' -and $env:GH_TOKEN) {
+    $pw = 0; $published = $false
+    while ($pw -lt 60 -and -not $published) {
+      Start-Sleep 2; $pw += 2
+      $code = ''
+      try { if (Test-Path $rf) { $code = (Get-Content $rf -Raw -ErrorAction SilentlyContinue).Trim() } } catch {}
+      if (-not $code) { $mNow = Marks; if ($mNow -match 'room code=(\S+)') { $code = $Matches[1] } }
+      if ($code) {
+        try {
+          $authH = @{ Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $apiPath = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/ci/coop-room-live.txt"
+          $cur = Invoke-RestMethod $apiPath -Headers $authH -ErrorAction SilentlyContinue
+          $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($code))
+          $body = @{ message = "ci: live co-op room code $code"; content = $b64; branch = 'main' }
+          if ($cur.sha) { $body.sha = $cur.sha }
+          Invoke-RestMethod -Method Put -Uri $apiPath -Headers $authH -Body ($body | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+          $published = $true
+          Write-Host "  room code $code published to ci/coop-room-live.txt (${pw}s)"
+        } catch { Write-Host "  room-code publish attempt failed: $_" }
+      }
+      $proc.Refresh(); if ($proc.HasExited) { break }
+    }
+    Rec 'coop-room-published' $published "code=$code after ${pw}s"
+  }
 
   # ---------- bounded wait: driver self-exits 0/2 ----------
   $bound = $DriverTimeoutSec + $OuterGraceSec
