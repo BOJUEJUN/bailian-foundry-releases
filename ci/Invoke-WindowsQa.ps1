@@ -494,6 +494,55 @@ try {
       } catch { Rec 'helper-real-apply-exit-0' $false "exception: $_" }
     }
   }
+
+  # ---------- 8. co-op acceptance (ARMED only, zero workflow changes) ---------
+  # ci/coop-acceptance.json arms this: main/installer publishes the BAILIAN_QA
+  # Windows build as an asset on the named release tag (draft OK — fetched via
+  # the ambient GH_TOKEN the workflow already exports), supplies the exact
+  # sha256/size/version, and a LIVE room code arrives via the same file (join)
+  # or a room file is written for peers (host). Disarmed => recorded SKIP.
+  # The dedicated windows-coop-qa.yml is staged but the token lacks the
+  # `workflow` scope to push it; this in-runner path needs no new permissions.
+  Write-Host '--- section 8: co-op acceptance (armed by ci/coop-acceptance.json)'
+  $coopArmFile = Join-Path $PSScriptRoot 'coop-acceptance.json'
+  $coopScript  = Join-Path $PSScriptRoot 'Invoke-CoopQa.ps1'
+  $carm = $null
+  if (Test-Path $coopArmFile) { try { $carm = Get-Content $coopArmFile -Raw | ConvertFrom-Json } catch { $carm = $null } }
+  if ($carm -and $carm.armed -eq $true -and $carm.qaTag -and $carm.qaAssetName -and $carm.qaSha256 -and $carm.qaSize -and (Test-Path $coopScript)) {
+    try {
+      # fetch the exact QA asset from the named release (draft-safe API)
+      $auth = @{ Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
+      $rels = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=50" -Headers $auth
+      $rel  = $rels | Where-Object { $_.tag_name -eq "$($carm.qaTag)" } | Select-Object -First 1
+      $qaAsset = $null
+      if ($rel) { $qaAsset = $rel.assets | Where-Object { $_.name -eq "$($carm.qaAssetName)" } | Select-Object -First 1 }
+      if (-not $qaAsset) { throw "QA asset '$($carm.qaAssetName)' not found in release '$($carm.qaTag)'" }
+      $qaZip = Join-Path $env:RUNNER_TEMP $qaAsset.name
+      Invoke-WebRequest "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($qaAsset.id)" `
+        -Headers ($auth + @{ Accept = 'application/octet-stream' }) -OutFile $qaZip -UseBasicParsing -TimeoutSec 600
+      Write-Host "QA asset downloaded: $($qaAsset.name) ($((Get-Item $qaZip).Length) bytes)"
+
+      $coopArgs = @{
+        QaZip = $qaZip
+        ExpectSha256 = "$($carm.qaSha256)"; ExpectSize = [long]$carm.qaSize
+        ExpectVersion = "$($carm.qaVersion)"; Role = "$($carm.role)"
+        QaName = 'QA-Win-CI'; Players = [int]$carm.players
+        DriverTimeoutSec = [int]$carm.driverTimeoutSec
+        WorkRoot = $WorkRoot; OutDir = $logDir
+      }
+      if ($carm.roomCode) { $coopArgs.RoomCode = "$($carm.roomCode)" }
+      & $coopScript @coopArgs | ForEach-Object { Write-Host "  $_" }
+      $coopJson = Join-Path $logDir 'coop-qa-results.json'
+      if (Test-Path $coopJson) {
+        $coopRes = Get-Content $coopJson -Raw | ConvertFrom-Json
+        foreach ($prop in $coopRes.PSObject.Properties) {
+          Rec $prop.Name ([bool]$prop.Value.ok) $prop.Value.note
+        }
+      } else { Rec 'coop-verdict' $false 'coop-qa-results.json missing — harness produced no evidence' }
+    } catch { Rec 'coop-verdict' $false "co-op section failed: $_" }
+  } else {
+    Rec 'coop-armed' $false 'co-op acceptance NOT armed — needs real QA build handoff + live room code' -Skip
+  }
 }
 finally {
   if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch {} }
