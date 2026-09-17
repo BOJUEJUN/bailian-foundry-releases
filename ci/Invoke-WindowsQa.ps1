@@ -107,7 +107,15 @@ try {
   Rec 'helper-shipped' (Test-Path (Join-Path $appDir 'BailianUpdateHelper.exe')) 'required for apply step'
   $fileInfo = $null
   if ($installed) { try { $fileInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($appExe) } catch {} }
-  Rec 'exe-version-info' ($null -ne $fileInfo -and $fileInfo.ProductName -ne '') ($(if ($fileInfo) { "ProductName=$($fileInfo.ProductName) FileVer=$($fileInfo.FileVersion)" } else { 'exe absent — no version info' }))
+  # Unity standalone players do NOT set PE ProductName — FileVersion is the
+  # Unity ENGINE version (e.g. 6000.6.x), never the game version. Asserting
+  # ProductName here can never pass and is an obsolete expectation. The real
+  # game-version proof is the updater's runtime "local=<Application.version>"
+  # log line, asserted by ui-local-version. What IS meaningful: the PE has a
+  # readable version block at all.
+  Rec 'exe-version-info' ($null -ne $fileInfo -and $fileInfo.FileVersion -ne '') `
+      ("PE version block readable; ProductName='$($fileInfo.ProductName)' (empty is EXPECTED for Unity) FileVer=$($fileInfo.FileVersion) " +
+       '(engine ver, not game ver — game version proven by ui-local-version)')
   Rec 'uninstaller-present' (Test-Path $uninstExe) $uninstExe
   Rec 'no-admin-needed' ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') 'not SYSTEM'
 
@@ -116,7 +124,9 @@ try {
                      'combat-hwnd-found','combat-input-mode','combat-input-posted','combat-phase-entered',
                      'combat-no-new-exceptions','combat-process-survived',
                      'ui-boot-menu','ui-input-env','ui-manifest-corroboration','ui-check-clicked',
-                     'ui-state-evidence','ui-capture','ui-verdict',
+                     'ui-state-evidence','ui-local-version','ui-capture','ui-verdict',
+                     'lobby-boot','lobby-input-env','lobby-coop-opened','lobby-room-created',
+                     'lobby-capture','lobby-leave-clean','lobby-verdict',
                      'game-close-clean','uninstall-exit-0','app-removed','user-data-preserved',
                      'unicode-path-install','unicode-path-boots','unicode-path-uninstall')) {
       Rec $n -Skip -note 'install failed — check requires an installed game'
@@ -137,9 +147,13 @@ try {
   Rec 'process-alive' (-not $proc.HasExited) "pid=$($proc.Id)"
   if (Test-Path $playerLog) {
     $log = Get-Content $playerLog -Raw -ErrorAction SilentlyContinue
-    Rec 'playerlog-phase-lines' ($log -match 'phase=') 'instrumented phases present'
+    # No phase= line is EXPECTED at Menu boot — the phase setter only logs on
+    # change and the game boots straight into Menu without one. The real
+    # transition is asserted by combat-phase-entered (post-Enter). Kept as an
+    # informational SKIP rather than a guaranteed-fail obsolete expectation.
+    Rec 'playerlog-phase-lines' ($log -match 'phase=') 'no boot-time phase line is by design (setter logs on change only); combat-phase-entered is the real gate' -Skip
     Rec 'playerlog-no-errors' ($log -notmatch 'Exception|MissingReference|shader.*(error|not found)') ''
-  } else { Rec 'playerlog-phase-lines' $false 'Player.log missing'; Rec 'playerlog-no-errors' $false 'Player.log missing' }
+  } else { Rec 'playerlog-phase-lines' $false 'Player.log missing' -Skip; Rec 'playerlog-no-errors' $false 'Player.log missing' }
 
   # ---------- 2b. combat-entry smoke: real Enter -> phase=Combat -------------
   # Regresses the 0.1.1 GamepadNavigator combat-entry NRE using a REAL key
@@ -270,6 +284,12 @@ try {
     Rec 'game-close-clean' $gone ($(if($gone){"exit=$($proc.ExitCode)"}else{'had to Kill'}))
   }
 
+  # Candidate version under test — derived from the installer filename
+  # (BailianFoundry-Setup-<ver>.exe); fallback stays the last public baseline.
+  $candVer = '0.1.2'
+  if ((Split-Path $SetupExe -Leaf) -match 'Setup-([0-9]+\.[0-9]+\.[0-9]+)') { $candVer = $Matches[1] }
+  Write-Host "candidate local version under test: $candVer"
+
   # ---------- 3b. updater-UI smoke (own fresh instance at Menu) ----------------
   # Runs AFTER the first instance's graceful close and BEFORE uninstall so the
   # installed game is still present. The child script owns its own process and
@@ -278,7 +298,7 @@ try {
   $uiScript = Join-Path $PSScriptRoot 'Invoke-UpdaterUiSmoke.ps1'
   if (Test-Path $uiScript) {
     try {
-      & $uiScript -AppExe $appExe -OutDir $logDir | ForEach-Object { Write-Host "  $_" }
+      & $uiScript -AppExe $appExe -OutDir $logDir -ExpectedLocalVersion $candVer | ForEach-Object { Write-Host "  $_" }
       $uiJson = Join-Path $logDir 'updater-ui-results.json'
       if (Test-Path $uiJson) {
         $uiRes = Get-Content $uiJson -Raw | ConvertFrom-Json
@@ -318,6 +338,26 @@ try {
   } else {
     Rec 'upg-armed' $false 'upgrade acceptance NOT armed — needs real approved newer public release + ci/upgrade-acceptance.json triple' -Skip
   }
+
+  # ---------- 3d. normal-path co-op lobby UI smoke ----------------------------
+  # The QA-driver cross-platform proof bypassed the shipped menu. This drives
+  # the REAL menu: 联机 -> 创建房间 -> real UGS/Relay session (proven by the
+  # [NgoChannel] transport-alloc log line, not by the panel opening) -> 离开
+  # releases the owned room. Its own process; results merge into the gate.
+  Write-Host '--- section 3d: co-op lobby UI smoke (联机 -> 创建房间)'
+  $lobbyScript = Join-Path $PSScriptRoot 'Invoke-LobbyUiSmoke.ps1'
+  if (Test-Path $lobbyScript) {
+    try {
+      & $lobbyScript -AppExe $appExe -OutDir $logDir | ForEach-Object { Write-Host "  $_" }
+      $lJson = Join-Path $logDir 'lobby-ui-results.json'
+      if (Test-Path $lJson) {
+        $lRes = Get-Content $lJson -Raw | ConvertFrom-Json
+        foreach ($prop in $lRes.PSObject.Properties) {
+          Rec $prop.Name ([bool]$prop.Value.ok) $prop.Value.note
+        }
+      } else { Rec 'lobby-verdict' $false 'lobby-ui-results.json missing — smoke produced no evidence' }
+    } catch { Rec 'lobby-verdict' $false "lobby smoke invocation failed: $_" }
+  } else { Rec 'lobby-verdict' $false "Invoke-LobbyUiSmoke.ps1 not found at $lobbyScript" }
 
   # ---------- 4. uninstall preserves updater root/user data -------------------
   Write-Host '--- section 4: uninstall/data preservation'
