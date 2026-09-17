@@ -1,14 +1,14 @@
 {
   "armed": true,
-  "role": "host",
-  "qaTag": "qa-f16-f06ea89",
+  "role": "join",
+  "qaTag": "qa-f16-rev2-253d90a",
   "qaAssetName": "bailian-qa-win-x64-f16.zip",
   "qaVersion": "0.1.3",
-  "qaSha256": "cfe851a7f5b2c03250000505801fa63b97e7e70dacf231242ef3d1c51c7768fb",
-  "qaSize": 77478228,
-  "roomCode": "",
+  "qaSha256": "9830206f93f13c846bd149962ab39351c5486816be6fd9823d0b0c8ca4e643f2",
+  "qaSize": 77480126,
+  "roomCode": "QCMLQR",
   "players": 2,
-  "driverTimeoutSec": 600,
+  "driverTimeoutSec": 430,
   "note": "Arm ONLY on a real handoff: main/installer owner publishes the BAILIAN_QA Windows build zip as an asset on release tag <qaTag> (draft is fine) AND supplies exact sha256/size, AND a live Mac-hosted room code exists (or is pasted at dispatch). Room code is an ephemeral lobby code, not a credential — safe to carry here or as a dispatch input. While armed=false the co-op QA flow is not invoked.",
   "exeName": "bailian-qa-f16.exe"
 }
