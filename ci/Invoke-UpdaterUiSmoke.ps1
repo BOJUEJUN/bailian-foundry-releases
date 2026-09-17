@@ -22,6 +22,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$AppExe,
   [string]$OutDir = (Join-Path $env:RUNNER_TEMP 'blqa\logs'),
+  [string]$ExpectedLocalVersion = '0.1.2',
   [int]$BootTimeoutSec = 45,
   [int]$CheckTimeoutSec = 30,
   [int]$DownloadTimeoutSec = 300,
@@ -173,7 +174,7 @@ try {
       $rawHead = if ($raw.Length -gt 80) { $raw.Substring(0,80) } else { $raw }
     } else { $remote = '(empty response)' }
   } catch { $remote = "(manifest GET failed: $($_.Exception.Message))" }
-  Rec 'ui-manifest-corroboration' $true "public manifest version='$remote' installed=0.1.2 raw='$rawHead'"
+  Rec 'ui-manifest-corroboration' $true "public manifest version='$remote' installed=$ExpectedLocalVersion raw='$rawHead'"
 
   # ---------- CHAR-offset snapshot, then click 检查更新 ----------
   $logOff = 0
@@ -206,6 +207,17 @@ try {
   $detail = ((LogTail) -split "`n" | Where-Object { $_ -match '\[bailian-update\]' }) -join ' | '
   Rec 'ui-state-evidence' ($null -ne $state) "state=$state after ${cw}s :: $detail"
 
+  # Runtime-version proof: the updater logs "local=<Application.version>
+  # remote=<manifest>" — assert local matches the candidate under test and
+  # remote matches the ACTUAL anonymous public manifest fetched above. A
+  # draft candidate (0.1.3) vs still-public 0.1.2 correctly shows UpToDate
+  # (local > remote => nothing to apply); do not require them to be equal.
+  $locV = $null; $remV = $null
+  if ($detail -match 'local=([0-9]+\.[0-9]+\.[0-9]+)') { $locV = $Matches[1] }
+  if ($detail -match 'remote=([0-9]+\.[0-9]+\.[0-9]+)') { $remV = $Matches[1] }
+  Rec 'ui-local-version' ($locV -eq $ExpectedLocalVersion -and $remV -eq "$remote") `
+      "runtime local=$locV (expect $ExpectedLocalVersion) remote=$remV (expect $remote)"
+
   Start-Sleep 1                                          # let status text paint
   $shot2 = if ($state) { Capture 'updater-2-settled.png' } else { $null }
   $shotNames = @($shot0, $shot1, $shot2 | Where-Object { $_ } | ForEach-Object { Split-Path $_ -Leaf }) -join ','
@@ -216,7 +228,7 @@ try {
     'UpToDate'  { Rec 'ui-verdict' $true "已是最新版本 expected — UI check against live manifest succeeded" }
     'Available' {
       $ok = [bool]$UpgradeExpected
-      Rec 'ui-verdict' $ok ("state=Available remote=$remote" + $(if (-not $ok) { ' — unexpected while manifest==installed (0.1.2): investigate' } else { '' }))
+      Rec 'ui-verdict' $ok ("state=Available remote=$remote" + $(if (-not $ok) { " — unexpected: installed=$ExpectedLocalVersion manifest=$remote; investigate" } else { '' }))
     }
     'Error'     {
       $netOk = ($remote -notmatch 'failed')
