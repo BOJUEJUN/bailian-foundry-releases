@@ -28,6 +28,7 @@
 
 param(
   [Parameter(Mandatory=$true)][string]$QaZip,
+  [string]$ExeName = '',   # QA builds are NOT BailianFoundry.exe (e.g. bailian-qa-f16.exe); empty = auto-detect
   [Parameter(Mandatory=$true)][string]$ExpectSha256,
   [Parameter(Mandatory=$true)][long]$ExpectSize,
   [string]$ExpectVersion = '',
@@ -112,8 +113,17 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($QaZip, $appDir)
   } catch { Rec 'coop-extract' $false "unzip failed: $_"; Rec 'coop-verdict' $false 'no runnable QA payload'; return }
-  $exe = Get-ChildItem $appDir -Filter 'BailianFoundry.exe' -Recurse | Select-Object -First 1
-  Rec 'coop-extract' ($null -ne $exe) $(if ($exe) { $exe.FullName } else { 'BailianFoundry.exe not found in QA zip' })
+  $exe = $null
+  if ($ExeName) {
+    $exe = Get-ChildItem $appDir -Filter $ExeName -Recurse | Select-Object -First 1
+  } else {
+    # QA builds ship their own exe name (e.g. bailian-qa-f16.exe). Prefer a
+    # root-level bailian-qa-*.exe, else the largest root .exe, else recursive.
+    $exe = Get-ChildItem $appDir -Filter 'bailian-qa-*.exe' -File | Select-Object -First 1
+    if (-not $exe) { $exe = Get-ChildItem $appDir -Filter '*.exe' -File | Sort-Object Length -Descending | Select-Object -First 1 }
+    if (-not $exe) { $exe = Get-ChildItem $appDir -Filter '*.exe' -File -Recurse | Sort-Object Length -Descending | Select-Object -First 1 }
+  }
+  Rec 'coop-extract' ($null -ne $exe) $(if ($exe) { $exe.FullName } else { "no .exe found in QA zip (ExeName='$ExeName')" })
   if (-not $exe) { Rec 'coop-verdict' $false 'no runnable QA payload'; return }
 
   # ---------- launch ONE owned QA process ----------
