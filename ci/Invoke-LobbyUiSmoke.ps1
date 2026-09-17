@@ -42,6 +42,7 @@ Add-Type -Namespace QaLobby -Name U32 -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool CloseDesktop(System.IntPtr h);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, System.UIntPtr extra);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, System.UIntPtr extra);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetClientRect(System.IntPtr h, out RECT r);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ClientToScreen(System.IntPtr h, ref POINT p);
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
@@ -60,9 +61,16 @@ function CanvasPoint($cx, $cy) {
   $cw = $cr.Right - $cr.Left; $ch = $cr.Bottom - $cr.Top
   if ($cw -le 0 -or $ch -le 0) { return $null }
   $scale = [Math]::Sqrt(($cw/1920.0)*($ch/1080.0))
+  # CanvasScaler match=0.5: the visible canvas is NOT exactly 1920x1080
+  # units — when the client aspect differs, visible units = clientPx/scale
+  # and the authored 1920x1080 content is CENTERED. Elements are offset by
+  # (visible - ref)/2 on each axis; omitting this put clicks ~48 units low
+  # (create-room click landed on join).
+  $hoff = ($cw / $scale - 1920.0) / 2.0
+  $voff = ($ch / $scale - 1080.0) / 2.0
   $o = New-Object QaLobby.U32+POINT
   if (-not [QaLobby.U32]::ClientToScreen($hwnd, [ref]$o)) { return $null }
-  return @{ X = [int]($o.X + $cx * $scale); Y = [int]($o.Y + $ch - $cy * $scale) }
+  return @{ X = [int]($o.X + ($cx + $hoff) * $scale); Y = [int]($o.Y + $ch - ($cy + $voff) * $scale) }
 }
 function ClickCanvas($cx, $cy, $tag) {
   $pt = CanvasPoint $cx $cy
@@ -158,6 +166,27 @@ try {
   }
   Rec 'lobby-coop-opened' $opened $(if ($opened) { 'physical click at 联机 (canvas 960,234); entry panel captured' } else { 'not attempted — input env unsupported or mapping failed' })
 
+  # ---------- nickname is REQUIRED (main verified: Create toasts "1-16
+  # chars" when empty). Focus the nick field (panel-local anchor(0,1)
+  # pos(72,-230) size(476,88) => canvas (960,546)) and type real letters.
+  # Foreground-gated keybd_event produces real WM_CHAR via TranslateMessage.
+  $nickTyped = $false
+  if ($opened) {
+    $null = ClickCanvas 960 546 'nick-field'
+    Start-Sleep -Milliseconds 400
+    foreach ($vk in 0x51,0x41,0x57,0x49,0x4E,0x43,0x49) {   # "qawinci"
+      if ([QaLobby.U32]::GetForegroundWindow() -ne $hwnd) { break }
+      [QaLobby.U32]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
+      [QaLobby.U32]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)
+      Start-Sleep -Milliseconds 60
+    }
+    $nickTyped = $true
+    Start-Sleep -Milliseconds 300
+    $shot1b = Capture 'lobby-1b-nick.png'              # shows typed nick text
+  }
+  Rec 'lobby-nick-typed' $nickTyped $(if ($nickTyped) { 'typed qawinci into nick field (see lobby-1b-nick.png)' } else { 'not attempted — lobby never opened' })
+
   # ---------- click 创建房间 -> wait for real Relay alloc ----------
   # EntryPanel is a 620x560 CENTERED modal (canvas 650..1270 x 260..820);
   # CreateBtn is panel-local (72,190)-(548,286) => canvas center (960,498).
@@ -204,6 +233,7 @@ finally {
   if ($proc -and -not $proc.HasExited) {
     try { $proc.CloseMainWindow() | Out-Null; if (-not $proc.WaitForExit(8000)) { $proc.Kill() } } catch {}
   }
+  try { if (Test-Path $playerLog) { Copy-Item $playerLog (Join-Path $OutDir 'lobby-Player.log') -Force } } catch {}
   $json = Join-Path $OutDir 'lobby-ui-results.json'
   $script:results | ConvertTo-Json -Depth 4 | Out-File $json -Encoding utf8
   Write-Host "results -> $json"
