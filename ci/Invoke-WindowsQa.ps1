@@ -524,6 +524,7 @@ try {
 
       $coopArgs = @{
         QaZip = $qaZip
+        ExeName = "$($carm.exeName)"
         ExpectSha256 = "$($carm.qaSha256)"; ExpectSize = [long]$carm.qaSize
         ExpectVersion = "$($carm.qaVersion)"; Role = "$($carm.role)"
         QaName = 'QA-Win-CI'; Players = [int]$carm.players
